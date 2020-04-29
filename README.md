@@ -315,15 +315,15 @@ Here are the steps for a production summary setup used for Exec Report. The deta
 Here are the steps to maintain a few mapping tables. The detail test script to see the Reference in code file “7 Snowflake Data Aggregator - Maintain feed contract and partner_tag usage”
 
 
-## VI. Author
+## VII. Author
 
 
 
-## VII. License
+## VIII. License
 
 This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details
 
-## VIII. Acknowledgments
+## IX. Acknowledgments
 
 * Hat tip to anyone whose code was used
 * Inspiration
