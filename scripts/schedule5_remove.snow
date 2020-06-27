@@ -1,0 +1,12 @@
+!set variable_substitution=true;
+use database &{db_name};
+use schema &{sc_name};
+--!set variable_substitution=false;
+--
+-------------------------------------------------------
+-- Remove installer created objects
+-------------------------------------------------------
+
+DROP PROCEDURE IF EXISTS &{db_name}.&{sc_name}.DATA_AGGREGATION_SOURCE_SETUP(STRING, STRING, BOOLEAN);
+DROP PROCEDURE IF EXISTS &{db_name}.&{sc_name}.DATA_AGGREGATION_SOURCE_SETUP(STRING, STRING, STRING, BOOLEAN);
+DROP PROCEDURE IF EXISTS &{db_name}.&{sc_name}.DATA_AGGREGATION_LANDSCAPE(STRING, STRING, VARIANT, VARIANT);

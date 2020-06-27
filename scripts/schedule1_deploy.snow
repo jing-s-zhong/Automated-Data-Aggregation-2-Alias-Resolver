@@ -1,0 +1,530 @@
+!set variable_substitution=true;
+use database &{db_name};
+use schema &{sc_name};
+!set variable_substitution=false;
+--
+--USE DATABASE BI_TEST;
+--USE SCHEMA _CONTROL_LOGIC;
+--
+------------------------------------------------------
+-- Landscape model generating procedure 
+------------------------------------------------------
+--DROP PROCEDURE DATA_AGGREGATION_LANDSCAPE(STRING, STRING, VARIANT, VARIANT);
+CREATE OR REPLACE PROCEDURE DATA_AGGREGATION_LANDSCAPE(
+    LANDSCAPE_TABLE STRING,
+    TEMPLATE_TABLE STRING,
+    GROUPBY_LIST VARIANT,
+    AGGREGATE_LIST VARIANT
+)
+RETURNS VARCHAR
+LANGUAGE JAVASCRIPT
+AS
+$$
+try {
+	var sqlScript = '';
+
+	//
+	// Get column names from template table
+	//
+	var snowText = `SELECT * FROM ` + TEMPLATE_TABLE + ` LIMIT 0;`;
+	var snowStmt = snowflake.createStatement({ sqlText: snowText});
+	var snowRslt = snowStmt.execute();
+	var colCount = snowStmt.getColumnCount();
+
+	var columnNames = [];
+	var columnUsage = [];
+	for (var i = 1; i <= colCount; i++) {
+		columnNames[i-1] = snowRslt.getColumnName(i);
+        if (GROUPBY_LIST.indexOf(columnNames[i-1]) != -1) {
+            columnUsage[i-1] = 1;
+        }
+        else if (AGGREGATE_LIST.indexOf(columnNames[i-1]) != -1) {
+            columnUsage[i-1] = 2;
+        }
+		else {
+			columnUsage[i-1] = 0;
+		}
+	}
+	//return JSON.stringify({"columnNames": columnNames, "columnUsage": columnUsage});
+
+	var snowText = `CREATE OR REPLACE TABLE ` + LANDSCAPE_TABLE + ` (
+        DATA_ALIAS \tTEXT,
+        DATA_TABLE \tTEXT,` + columnNames.map((x,i) => {return '\n\t\t' + x + ' \tTEXT'}) + `
+        );`;
+    //return snowText;
+    var snowStmt = snowflake.createStatement({ sqlText: snowText});
+	var snowRslt = snowStmt.execute();
+    sqlScript += snowText + '\n\n';
+            
+	var snowText = `INSERT INTO ` + LANDSCAPE_TABLE + ` (
+        DATA_ALIAS,
+        DATA_TABLE,` + columnNames.map((x,i) => {return '\n\t\t' + x + ''}) + `
+        )
+      VALUES (
+        'COLUMN_DATA',
+        '',` + columnUsage.map((x,i) => {return '\n\t\t' + (x ? (x == 1 ? '\'GROUP_BY\'' : '\'AGGREGATE\'') : '\'\'')}) + `
+        );`
+    //return snowText;
+	var snowStmt = snowflake.createStatement({ sqlText: snowText});
+	var snowRslt = snowStmt.execute();
+    sqlScript += snowText + '\n\n';
+
+    return sqlScript;
+}
+catch (err) {
+	return "Failed: " + err
+}
+$$;
+--
+------------------------------------------------------
+-- Aliasing resolver procedure 
+------------------------------------------------------
+--DROP PROCEDURE DATA_AGGREGATION_SOURCE_SETUP(STRING, STRING, STRING, BOOLEAN);
+CREATE OR REPLACE PROCEDURE DATA_AGGREGATION_SOURCE_SETUP(
+    LANDSCAPE_TABLE STRING,
+    TARGET_TABLE STRING,
+    SOURCE_TABLE STRING,
+    SCRIPT_ONLY BOOLEAN)
+RETURNS VARCHAR
+LANGUAGE JAVASCRIPT
+AS
+$$
+try {
+	var transQuery = '', sourceTitle = '';
+
+	//
+	// Get batch control column and batch size function
+	//
+	var targetQuery = `SELECT *
+	  FROM DATA_AGGREGATION_TARGETS
+	  WHERE TARGET_TABLE = :1`;
+
+	var targetStmt = snowflake.createStatement({
+			sqlText: targetQuery,
+			binds: [TARGET_TABLE]
+		});
+
+	var target = targetStmt.execute();
+
+	if (target.next()) {
+		batchControlColumn = target.getColumnValue("BATCH_CONTROL_COLUMN");
+		batchControlNext = target.getColumnValue("BATCH_CONTROL_NEXT");
+	} else {
+		return '\n\n-- Skip this schedule as previous schedule has not done yet!\n'
+	}
+
+	//
+	// Get the column definitions and compact the data scale by filtering out unneeded columns
+	//
+	var landscapeQuery = `SELECT F.JOIN_MODE, A.*
+	FROM 
+	(
+	  SELECT *
+	  FROM ` + LANDSCAPE_TABLE + `
+	  WHERE DATA_TABLE IN (:1, :2)
+	  OR DATA_ALIAS LIKE ANY ('COLUMN_DATA','LOOK_%', 'MAP_%')
+	) A
+	JOIN (
+	  SELECT D.LOOKUP_ORDER, E.MAP_ORDER, COALESCE(E.DATA_ALIAS, D.DATA_ALIAS) DATA_ALIAS, COALESCE(E.JOIN_MODE, D.JOIN_MODE, 'LEFT') JOIN_MODE
+	  FROM (
+		  SELECT L.INDEX LOOKUP_ORDER, SPLIT(L.VALUE,'@')[0] DATA_ALIAS , SPLIT(L.VALUE,'@')[1] JOIN_MODE
+		  FROM (
+			SELECT SPLIT(CONCAT('COLUMN_DATA,TARGET_DATA,',SPLIT(DATA_ALIAS,':')[1]),',') ALIAS
+			FROM ` + LANDSCAPE_TABLE + `
+			WHERE DATA_TABLE = :1
+		  ) B,
+		  LATERAL FLATTEN (INPUT => ALIAS) L
+		) D
+	  LEFT JOIN (
+		  SELECT M.INDEX MAP_ORDER, SPLIT(M.VALUE,'@')[0] DATA_ALIAS, SPLIT(M.VALUE,'@')[1] JOIN_MODE
+		  FROM (
+			SELECT SPLIT(CONCAT('SOURCE_DATA,MAP_SOURCE,',SPLIT(DATA_ALIAS,':')[1]),',') ALIAS
+			FROM ` + LANDSCAPE_TABLE + `
+			WHERE DATA_TABLE = :2
+		  ) C,
+		  LATERAL FLATTEN (INPUT => ALIAS) M
+		) E
+	  ON D.DATA_ALIAS = 'SOURCE_DATA'
+	) F
+	ON STARTSWITH(A.DATA_ALIAS, F.DATA_ALIAS)
+	ORDER BY F.LOOKUP_ORDER, F.MAP_ORDER`;
+
+	//return landscapeQuery.replace(/:1/g, "'" + TARGET_TABLE + "'").replace(/:2/g, "'" + SOURCE_TABLE + "'");
+
+
+	var landscapeStmt = snowflake.createStatement({
+			sqlText: landscapeQuery,
+			binds: [TARGET_TABLE, SOURCE_TABLE]
+		});
+
+	var target = landscapeStmt.execute();
+	var colCount = landscapeStmt.getColumnCount();
+
+	var landscape = {};
+	var lookupStack = [];
+	var mapStack = [];
+	var colValues = [];
+	var colFilter = [];
+	var dimGroupBy = [];
+	var dimTarget = [];
+	var dimSource = [];
+	var dimJoinIn = [];
+	var aliasColumnID = 1;
+	for (var i = aliasColumnID; i <= colCount; i++) {
+		colValues[i - aliasColumnID] = landscapeStmt.getColumnName(i);
+		colFilter[i - aliasColumnID] = ["DATA_ALIAS", "DATA_TABLE", "DATA_PATTERN", "DATA_TIME"].includes(colValues[i - aliasColumnID]) ? 1 : 0;
+		dimSource[i - aliasColumnID] = colValues[i - aliasColumnID] === "DATA_PATTERN" ? 1 : 0;
+		dimJoinIn[i - aliasColumnID] = colValues[i - aliasColumnID] === "DATA_PATTERN" ? 1 : 0;
+	}
+	landscape["HEADER_DATA"] = colValues;
+
+	//return JSON.stringify({"colValues": colValues, "colFilter": colFilter, "dimSource": dimSource, "dimJoinIn": dimJoinIn});
+
+	var j = 0;
+	while (target.next()) {
+		colValues = [];
+		for (var i = aliasColumnID; i <= colCount; i++) {
+			//var item;
+			//switch (i) {
+			//	case aliasColumnID + 1:
+			//		item = target.getColumnValue(i).split(':')[0];
+			//		break;
+			//	case aliasColumnID + 2:
+			//		item = target.getColumnValue(i).split(':')[0];
+			//		break;
+			//	default:
+			//		item = target.getColumnValue(i);
+			//		break;
+			//}
+			var item = (i === (aliasColumnID + 1) ? target.getColumnValue(i).split(':')[0] : target.getColumnValue(i));
+			colValues[i - aliasColumnID] = item ? item : '';
+
+			switch (colValues[aliasColumnID]) {
+				case 'COLUMN_DATA':
+					dimGroupBy[i - aliasColumnID] = colValues[i - aliasColumnID] === 'GROUP_BY' ? 1 : 0;
+					break;
+				case 'TARGET_DATA':
+					dimTarget[i - aliasColumnID] = colValues[i - aliasColumnID] ? 1 : 0;
+					colFilter[i - aliasColumnID] = colFilter[i - aliasColumnID] || dimTarget[i - aliasColumnID];
+					break;
+				case 'SOURCE_DATA':
+					dimSource[i - aliasColumnID] = dimSource[i - aliasColumnID] || (colValues[i - aliasColumnID] ? 1 : 0);
+					break;
+				default:
+					dimJoinIn[i - aliasColumnID] = dimJoinIn[i - aliasColumnID] || (colValues[i - aliasColumnID] ? 1 : 0);
+					colFilter[i - aliasColumnID] = colFilter[i - aliasColumnID] || (colValues[i - aliasColumnID].split(':').length > 1);
+					break;
+			}
+		}
+		if (j < 3) {
+			landscape[colValues[aliasColumnID]] = colValues;
+		}
+		else if (colValues[aliasColumnID].startsWith('LOOK_')) {
+			lookupStack[lookupStack.length] = {"JOIN_MODE": target.getColumnValue("JOIN_MODE"), "COLUMN": colValues};
+		} else if (colValues[aliasColumnID].startsWith('MAP_')) {
+			mapStack[mapStack.length] = {"JOIN_MODE": target.getColumnValue("JOIN_MODE"), "COLUMN": colValues};
+		}
+		j++;
+	}
+
+	dimTarget = dimTarget.map((x,i) => {return x && (dimSource[i] || dimJoinIn[i])});
+	dimTarget = dimTarget.filter(function(x,i){return dimGroupBy[i]});
+	dimSource = dimSource.filter(function(x,i){return dimGroupBy[i]});
+	  
+	//return JSON.stringify({"colFilter": colFilter, "dimGroupBy": dimGroupBy, "dimTarget": dimTarget, "dimSource": dimSource });
+
+	var alias;  
+	for (alias in landscape) {
+		landscape[alias] = landscape[alias].filter(function(x,i) {return colFilter[i]});
+	}
+	colCount = landscape[alias].length;
+	for (var j = 0; j < lookupStack.length; j++) {
+		lookupStack[j]["COLUMN"] = lookupStack[j]["COLUMN"].filter(function(x,i) {return colFilter[i]});
+	}
+	for (var j = 0; j < mapStack.length; j++) {
+		mapStack[j]["COLUMN"] = mapStack[j]["COLUMN"].filter(function(x,i) {return colFilter[i]});
+	}
+	  
+	//return JSON.stringify({"landscape": landscape, "lookupStack": lookupStack, "mapStack": mapStack });
+
+	//
+	// Create transformation generation context data
+	//
+	var context = {};
+	context["TARGET_LIST"] = dimTarget;
+	context["SOURCE_LIST"] = dimSource;
+	context["HEADER_DATA"] = [];
+	context["TARGET_DATA"] = [];
+	context["SOURCE_DATA"] = [];
+	context["HEADER_AGGR"] = [];
+	context["TARGET_AGGR"] = [];
+	context["FUNCTI_AGGR"] = [];
+	context["ADJUST_AGGR"] = [];
+
+	var dimLookUp = [];
+	for (var j = 0; j < lookupStack.length; j++) {
+		context[lookupStack[j]["COLUMN"][0]] = [];
+		dimLookUp[j] = {};
+		dimLookUp[j]["LOOKUP_DATA"] = [];
+		dimLookUp[j]["LOOKUP_TABLE"] = lookupStack[j]["COLUMN"][1].replace(/\'/g, "");
+		dimLookUp[j]["LOOKUP_ALIAS"] = lookupStack[j]["COLUMN"][0];
+		dimLookUp[j]["LOOKUP_MODE"] = lookupStack[j]["JOIN_MODE"];
+		dimLookUp[j]["LOOKUP_JOIN"] = [];
+	}
+
+	var dimMap = [];
+	for (var j = 0; j < mapStack.length; j++) {
+		context[mapStack[j]["COLUMN"][0]] = [];
+		dimMap[j] = {};
+		dimMap[j]["MAP_DATA"] = [];
+		dimMap[j]["MAP_TABLE"] = mapStack[j]["COLUMN"][1].replace(/\'/g, "");
+		dimMap[j]["MAP_ALIAS"] = mapStack[j]["COLUMN"][0];
+		dimMap[j]["MAP_MODE"] = mapStack[j]["JOIN_MODE"];
+		dimMap[j]["MAP_JOIN"] = [];
+	}
+
+	for (var i = 2; i < colCount; i++) {
+		switch (landscape["COLUMN_DATA"][i]) {
+		case 'GROUP_BY':
+			context["HEADER_DATA"][context["HEADER_DATA"].length] = landscape["HEADER_DATA"][i];
+			context["TARGET_DATA"][context["TARGET_DATA"].length] = landscape["TARGET_DATA"][i] && landscape["TARGET_DATA"][i].split(':')[1] ? landscape["TARGET_DATA"][i].split(':')[1] : '';
+			context["SOURCE_DATA"][context["SOURCE_DATA"].length] = landscape["SOURCE_DATA"][i] ? landscape["SOURCE_DATA"][i] : 'NULL';
+
+			for (var j = 0; j < lookupStack.length; j++) {
+				context[lookupStack[j]["COLUMN"][0]][context[lookupStack[j]["COLUMN"][0]].length] = (lookupStack[j]["COLUMN"][i] ? lookupStack[j]["COLUMN"][i].split(':')[0] : 'NULL ' + landscape["HEADER_DATA"][i]);
+				//dimLookUp[j]["LOOKUP_DATA"][dimLookUp[j]["LOOKUP_DATA"].length] = (lookupStack[j]["COLUMN"][i] ? lookupStack[j]["COLUMN"][i].split(':')[0] : 'NULL') + ' ' + landscape["HEADER_DATA"][i];
+				if (lookupStack[j]["COLUMN"][i] && lookupStack[j]["COLUMN"][i].split(':')[1]) {
+					var joinItem = lookupStack[j]["COLUMN"][i].split(':')[1].replace(/SOURCE_DATA/g, 'SOURCE_DATA.' + landscape["HEADER_DATA"][i]);
+					for (alias in context) {
+						if (alias != 'SOURCE_DATA') {
+							var aliasRegEx = new RegExp(alias, 'g');
+							joinItem = joinItem.replace(aliasRegEx, alias + '.' +  context[alias][context[alias].length-1]);
+							//joinItem = joinItem.replace(aliasRegEx, alias + '.' + JSON.stringify(context[alias]) + '=>' + i);
+						}
+					}
+					dimLookUp[j]["LOOKUP_JOIN"][dimLookUp[j]["LOOKUP_JOIN"].length] = joinItem;
+				}
+			}
+
+			for (var j = 0; j < mapStack.length; j++) {
+				context[mapStack[j]["COLUMN"][0]][context[mapStack[j]["COLUMN"][0]].length] = (mapStack[j]["COLUMN"][i] ? mapStack[j]["COLUMN"][i].split(':')[0] : 'NULL ' + landscape["HEADER_DATA"][i]);
+				//dimMap[j]["LOOKUP_DATA"][dimMap[j]["LOOKUP_DATA"].length] = (mapStack[j]["COLUMN"][i] ? mapStack[j]["COLUMN"][i].split(':')[0] : 'NULL') + ' ' + landscape["HEADER_DATA"][i];
+				if (mapStack[j]["COLUMN"][i] && mapStack[j]["COLUMN"][i].split(':')[1]) {
+					var joinItem = mapStack[j]["COLUMN"][i].split(':')[1].replace(/MAP_SOURCE/g, landscape["SOURCE_DATA"][i]);
+					for (alias in context) {
+						var aliasRegEx = new RegExp(alias, 'g');
+						joinItem = joinItem.replace(aliasRegEx, alias + '.' + context[alias][context[alias].length-1]);
+						//joinItem = joinItem.replace(aliasRegEx, alias + '.' + JSON.stringify(context[alias]) + '=>' + i);
+					}
+					dimMap[j]["MAP_JOIN"][dimMap[j]["MAP_JOIN"].length] = joinItem;
+				}
+			}
+			break;
+		case 'AGGREGATE':
+			if (landscape["TARGET_DATA"][i]) {
+				context["HEADER_AGGR"][context["HEADER_AGGR"].length] = landscape["HEADER_DATA"][i];
+				context["TARGET_AGGR"][context["TARGET_AGGR"].length] = (landscape["SOURCE_DATA"][i] ? landscape["SOURCE_DATA"][i] : 'NULL');
+				context["FUNCTI_AGGR"][context["FUNCTI_AGGR"].length] = landscape["TARGET_DATA"][i].split(':')[1].split(',')[0];
+				context["ADJUST_AGGR"][context["ADJUST_AGGR"].length] = landscape["TARGET_DATA"][i].split(':')[1].split(',')[1];
+			}
+			break;
+		}
+	}
+
+	//context["LOOKUP_UNIT"][0] = "DATA_PATTERN(PARSE_JSON('[" + context["TARGET_LIST"] + "]'))";
+	//context["SOURCE_DATA"][0] = "DATA_PATTERN(PARSE_JSON('[" + context["SOURCE_LIST"] + "]'))";
+	//dimLookUp[0]["LOOKUP_DATA"][0] = "DATA_PATTERN(PARSE_JSON('[" + context["TARGET_LIST"] + "]')) DATA_PATTERN";
+	context["$PATTERN"] = "DATA_PATTERN(PARSE_JSON('[" + context["TARGET_LIST"] + "]'))";
+	context["LOOKUP_STACK"] = dimLookUp;
+	context["MAP_STACK"] = dimMap;
+
+	//return JSON.stringify(context);
+
+	//
+	// Generate transformation query
+	//
+	var transQuery = `
+		  SELECT `
+			+ context["TARGET_DATA"].map((x, i) => {return (x ? 'COALESCE(' + x.split(',').map(y => {return y.startsWith("$") ? context[y] : (y + '.' + (y === "SOURCE_DATA" ? context["HEADER_DATA"][i] : context[y][i]))}) + ') ' : 'SOURCE_DATA.') + context["HEADER_DATA"][i]}) + `,`
+			+ context["ADJUST_AGGR"].map((x, i) => {return (x ? x.replace('?', 'SOURCE_DATA.' + context["HEADER_AGGR"][i]) : ('SOURCE_DATA.' + context["HEADER_AGGR"][i])) + ' ' + context["HEADER_AGGR"][i]}) + `
+		  FROM (
+			  SELECT ` + context["HEADER_DATA"].map((x, i) => {return (x == "DATA_PATTERN" ? "DATA_PATTERN(PARSE_JSON('[" + context["SOURCE_LIST"] + "]'))" : context["SOURCE_DATA"][i]) + ' ' + x}) + `,
+				  ` + context["FUNCTI_AGGR"].map((x, i) => {return x.replace('?', context["TARGET_AGGR"][i]) + ' ' + context["HEADER_AGGR"][i]}) + `
+			  FROM ` + SOURCE_TABLE.split('/')[0] + ` MAP_SOURCE`
+
+		for (var j = 0; j < mapStack.length; j++) {
+			transQuery += `
+			  ` + dimMap[j]["MAP_MODE"] + ` JOIN ` + dimMap[j]["MAP_TABLE"] + ` ` + dimMap[j]["MAP_ALIAS"] + `
+				ON ` + dimMap[j]["MAP_JOIN"].map(x => {
+				return x
+			}).join(`
+					AND `)
+		}
+
+    transQuery += `
+			  WHERE ` + landscape["SOURCE_DATA"][landscape["HEADER_DATA"].indexOf(batchControlColumn)] + ` >= :1 
+			  AND ` + landscape["SOURCE_DATA"][landscape["HEADER_DATA"].indexOf(batchControlColumn)] + ` < ` + batchControlNext + `
+			  GROUP BY ` + context["SOURCE_DATA"].filter(x => isNaN(x) && x !== "NULL" && x.indexOf("\'") === -1) + `
+			  ) SOURCE_DATA`;
+
+	for (var j = 0; j < lookupStack.length; j++) {
+		transQuery += `
+		  ` + dimLookUp[j]["LOOKUP_MODE"] + ` JOIN ` + dimLookUp[j]["LOOKUP_TABLE"] + ` ` + dimLookUp[j]["LOOKUP_ALIAS"] + `
+			ON ` + dimLookUp[j]["LOOKUP_JOIN"].map(x => {
+			return x
+		}).join(`
+			  AND `)
+	}
+
+	transQuery += `
+		  `;
+	//return transQuery.replace(/:1/g, "'2020-01-01'").replace(/:2/g, 5);
+
+	//
+	// Create a row in source table for one source data
+	//
+	var insertQuery = `
+      MERGE INTO DATA_AGGREGATION_SOURCES D
+      USING (
+          SELECT 'Auto: generated by aliasing resolver' SOURCE_LABEL
+              ,$1 TARGET_TABLE
+              ,$2 SOURCE_TABLE
+              ,False SOURCE_ENABLED
+              ,0 PATTERN_DEFAULT
+              ,False PATTERN_FLEXIBLE
+              ,DATE_TRUNC('MONTH', CURRENT_DATE())-1 DATA_AVAILABLETIME
+              ,NULL DATA_CHECKSCHEDULE
+              ,$3 TRANSFORMATION
+          FROM VALUES (:1, :2, :3)
+          ) S
+      ON D.TARGET_TABLE = S.TARGET_TABLE AND D.SOURCE_TABLE = S.SOURCE_TABLE
+      WHEN MATCHED THEN UPDATE SET ID = D.ID
+          ,SOURCE_LABEL = S.SOURCE_LABEL
+          --,TARGET_TABLE = S.TARGET_TABLE
+          --,SOURCE_TABLE = S.SOURCE_TABLE
+          ,SOURCE_ENABLED = S.SOURCE_ENABLED
+          ,PATTERN_DEFAULT = S.PATTERN_DEFAULT
+          ,PATTERN_FLEXIBLE = S.PATTERN_FLEXIBLE
+          ,DATA_AVAILABLETIME = S.DATA_AVAILABLETIME
+          ,DATA_CHECKSCHEDULE = S.DATA_CHECKSCHEDULE
+          ,TRANSFORMATION = S.TRANSFORMATION
+      WHEN NOT MATCHED THEN INSERT (
+          SOURCE_LABEL
+          ,TARGET_TABLE
+          ,SOURCE_TABLE
+          ,SOURCE_ENABLED
+          ,PATTERN_DEFAULT
+          ,PATTERN_FLEXIBLE
+          ,DATA_AVAILABLETIME
+          ,DATA_CHECKSCHEDULE
+          ,TRANSFORMATION
+          )
+      VALUES (
+          SOURCE_LABEL
+          ,TARGET_TABLE
+          ,SOURCE_TABLE
+          ,SOURCE_ENABLED
+          ,PATTERN_DEFAULT
+          ,PATTERN_FLEXIBLE
+          ,DATA_AVAILABLETIME
+          ,DATA_CHECKSCHEDULE
+          ,TRANSFORMATION
+          );
+      `;
+
+	var insertStmt = snowflake.createStatement({
+			sqlText: insertQuery,
+			binds: [
+				TARGET_TABLE,
+				SOURCE_TABLE,
+				transQuery
+			]
+		});
+
+	if (!SCRIPT_ONLY) {
+		insertStmt.execute();
+	}
+
+	var sqlExecuted = insertStmt.getSqlText()
+		.replace(/:1/g, "'" + TARGET_TABLE + "'")
+		.replace(/:2/g, "'" + SOURCE_TABLE + "'")
+		.replace(/:3/g, "$transQuery");
+
+	sourceTitle = '-'.repeat(65)
+		 + `\n-- ` + SOURCE_TABLE.replace('DATAMART.' + LANDSCAPE_TABLE + '_NETWORK.', '')
+		 + `\n` + '-'.repeat(65) + `\n`;
+	var sqlScript = sourceTitle + `\n-- SET transQuery = \n\n` + transQuery + `\n\n` + '-'.repeat(65) + `\n\n` + sqlExecuted;
+
+	return sqlScript;
+}
+catch (err) {
+	return "Failed: " + err
+}
+$$;
+--
+------------------------------------------------------
+--Aggregate tagert setup stored procedues to loop all available source tables
+------------------------------------------------------
+--DROP PROCEDURE DATA_AGGREGATION_SOURCE_SETUP(STRING, STRING, BOOLEAN);
+CREATE OR REPLACE PROCEDURE DATA_AGGREGATION_SOURCE_SETUP(
+    LANDSCAPE_TABLE STRING,
+    TARGET_TABLE STRING,
+    SCRIPT_ONLY BOOLEAN)
+RETURNS VARCHAR
+LANGUAGE JAVASCRIPT
+AS
+$$
+try {
+     var loopScript = '', loopSegmenter = '';
+
+    var sourceQuery = `SELECT REPLACE(DATA_TABLE,'''','') DATA_TABLE
+      FROM ` + LANDSCAPE_TABLE + `
+      WHERE DATA_TABLE NOT IN (
+          SELECT SOURCE_TABLE
+          FROM DATA_AGGREGATION_SOURCES
+          WHERE TARGET_TABLE = :1
+        )
+      AND DATA_ALIAS LIKE 'SOURCE_DATA%'
+      AND COALESCE(DATA_TIME, '') != ''`;
+
+    var sourceStmt = snowflake.createStatement({
+            sqlText: sourceQuery,
+            binds: [TARGET_TABLE]
+        });
+
+    var source = sourceStmt.execute();
+    while (source.next()) {
+        sourceTable = source.getColumnValue("DATA_TABLE").replace(/\'/g, "");
+
+        var callQuery = `CALL DATA_AGGREGATION_SOURCE_SETUP (
+          :1, 
+          :2, 
+          :3,
+          :4
+          );`;
+        var callStmt = snowflake.createStatement({
+                sqlText: callQuery,
+                binds: [LANDSCAPE_TABLE, TARGET_TABLE, sourceTable, SCRIPT_ONLY]
+            });
+
+        if (!SCRIPT_ONLY) {
+            callStmt.execute();
+        }
+
+        loopSegmenter = `\n\n--` + '='.repeat(65)
+             + `\n-- ` + sourceTable.replace('DATAMART.' + LANDSCAPE_TABLE + '_NETWORK.', '')
+             + `\n--` + '='.repeat(65) + `\n`;
+        loopScript = loopScript + loopSegmenter
+             + callStmt.getSqlText()
+                .replace(/:1/g, '\'' + LANDSCAPE_TABLE + '\'')
+                .replace(/:2/g, '\'' + TARGET_TABLE + '\'')
+                .replace(/:3/g, '\'' + sourceTable + '\'')
+                .replace(/:4/g,  + SCRIPT_ONLY.toString());
+    }
+
+    return loopScript;
+}
+catch (err) {
+	return "Failed: " + err
+}
+$$;

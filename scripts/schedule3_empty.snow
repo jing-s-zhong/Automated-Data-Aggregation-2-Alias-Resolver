@@ -1,0 +1,51 @@
+!set variable_substitution=true;
+use database &{db_name};
+use schema &{sc_name};
+!set variable_substitution=false;
+-------------------------------------------------------
+-- Create a dummy aggreagtion table
+-------------------------------------------------------
+--
+-- Remove registratered test source
+--
+DELETE FROM DATA_AGGREGATION_SOURCES WHERE TARGET_TABLE = '_DATA_AGGREGATION_TEMPLATE';
+--
+-- Remove registratered test target
+--
+DELETE FROM DATA_AGGREGATION_TARGETS WHERE TARGET_TABLE = '_DATA_AGGREGATION_TEMPLATE';
+--
+-- Drop the test data
+--
+DROP TABLE IF EXISTS _LOOKUP_INT_1;
+--
+-- Drop the test data
+--
+DROP TABLE IF EXISTS _LOOKUP_INT_2;
+--
+-- Drop the test data
+--
+DROP TABLE IF EXISTS _LOOKUP_INT_3;
+--
+-- Drop the test data
+--
+DROP TABLE IF EXISTS _MAPPING_CHAR_1;
+--
+-- Drop the test data
+--
+DROP TABLE IF EXISTS _MAPPING_CHAR_2;
+--
+-- Drop the test data
+--
+DROP TABLE IF EXISTS _DATA_AGGREGATION_LANDSCAPE;
+--
+-- Drop the test data
+--
+DROP TABLE IF EXISTS _DATA_AGGREGATION_TEMPLATE;
+--
+-- Drop the test data
+--
+DROP TABLE IF EXISTS _TEST_DATA_SOURCE_3;
+--
+-- Drop the test data
+--
+DROP TABLE IF EXISTS _TEST_DATA_SOURCE_4;
