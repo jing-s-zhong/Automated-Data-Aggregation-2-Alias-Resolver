@@ -1,4 +1,4 @@
-# Automated Data Aggregation (2): Data Aliasing 
+# Automated Data Aggregation (2): Alias Resolver 
 
 The revenue reports provided by our revenue partners show a variety of differences. Some of them contain a large list of the columns and present very detailed summary data, for example the revenue reports from Bing and Yahoo have the detailed data. And many reports from other partners just contain very few columns and present highly summarized data, for example the reports from Triple_Lift and Rubicon are very simple. Besides the reports format difference, every report uses their own defined column name stand for a similar or exactly same business measure, for example a simple concept of “revenue”, the column name could be “revenue”, “earnings”, “gross_revenue”, “estimated_revenue”, “ad_revenue”, “gorss_revenue_usd”, “net_revenue_usd”, “estimated_gross_revenue” from different reports [1]. It is obvious we need a simple solution to handle these issues effectively. It comes out as the requirement here.
 
