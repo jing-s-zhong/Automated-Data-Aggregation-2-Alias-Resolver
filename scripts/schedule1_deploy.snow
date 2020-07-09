@@ -6,6 +6,15 @@ use schema &{sc_name};
 --USE DATABASE BI_TEST;
 --USE SCHEMA _CONTROL_LOGIC;
 --
+-------------------------------------------------------
+-- Create a source data filter table
+-------------------------------------------------------
+CREATE OR REPLACE TABLE DATA_AGGREGATION_FILTERS (
+  FILTER_PATTERN VARCHAR,
+  FILTER_NAME VARCHAR,
+  FILTER_DETAIL VARCHAR
+);
+SELECT * FROM DATA_AGGREGATION_FILTERS;
 ------------------------------------------------------
 -- Landscape model generating procedure 
 ------------------------------------------------------
@@ -116,7 +125,8 @@ try {
 	//
 	// Get the column definitions and compact the data scale by filtering out unneeded columns
 	//
-	var landscapeQuery = `SELECT F.JOIN_MODE, A.*
+	var landscapeQuery = `SELECT BITAND_AGG(TO_NUMERIC(NULLIF(NULLIF(DATA_PATTERN,'GROUP_BY'),''))) OVER() MAP_PATTERN,
+      F.JOIN_MODE, A.*
 	FROM 
 	(
 	  SELECT *
@@ -169,7 +179,7 @@ try {
 	var dimTarget = [];
 	var dimSource = [];
 	var dimJoinIn = [];
-	var aliasColumnID = 1;
+	var aliasColumnID = 2;
 	for (var i = aliasColumnID; i <= colCount; i++) {
 		colValues[i - aliasColumnID] = landscapeStmt.getColumnName(i);
 		colFilter[i - aliasColumnID] = ["DATA_ALIAS", "DATA_TABLE", "DATA_PATTERN", "DATA_TIME"].includes(colValues[i - aliasColumnID]) ? 1 : 0;
@@ -199,7 +209,7 @@ try {
 			var item = (i === (aliasColumnID + 1) ? target.getColumnValue(i).split(':')[0] : target.getColumnValue(i));
 			colValues[i - aliasColumnID] = item ? item : '';
 
-			switch (colValues[aliasColumnID]) {
+			switch (colValues[1]) {
 				case 'COLUMN_DATA':
 					dimGroupBy[i - aliasColumnID] = colValues[i - aliasColumnID] === 'GROUP_BY' ? 1 : 0;
 					break;
@@ -217,11 +227,11 @@ try {
 			}
 		}
 		if (j < 3) {
-			landscape[colValues[aliasColumnID]] = colValues;
+			landscape[colValues[1]] = colValues;
 		}
-		else if (colValues[aliasColumnID].startsWith('LOOK_')) {
+		else if (colValues[1].startsWith('LOOK_')) {
 			lookupStack[lookupStack.length] = {"JOIN_MODE": target.getColumnValue("JOIN_MODE"), "COLUMN": colValues};
-		} else if (colValues[aliasColumnID].startsWith('MAP_')) {
+		} else if (colValues[1].startsWith('MAP_')) {
 			mapStack[mapStack.length] = {"JOIN_MODE": target.getColumnValue("JOIN_MODE"), "COLUMN": colValues};
 		}
 		j++;
@@ -364,7 +374,7 @@ try {
     transQuery += `
 			  WHERE ` + landscape["SOURCE_DATA"][landscape["HEADER_DATA"].indexOf(batchControlColumn)] + ` >= :1 
 			  AND ` + landscape["SOURCE_DATA"][landscape["HEADER_DATA"].indexOf(batchControlColumn)] + ` < ` + batchControlNext + `
-			  GROUP BY ` + context["SOURCE_DATA"].filter(x => isNaN(x) && x !== "NULL" && x.indexOf("\'") === -1) + `
+			  GROUP BY ` + context["SOURCE_DATA"].filter(x => isNaN(x) && x !== "NULL" && x.indexOf("\'") !== 0) + `
 			  ) SOURCE_DATA`;
 
 	for (var j = 0; j < lookupStack.length; j++) {
