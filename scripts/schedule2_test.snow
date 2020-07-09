@@ -12,7 +12,7 @@ use schema &{sc_name};
 -- Create two dummy aggreagtion data sources
 -------------------------------------------------------
 --
--- Create dummy aggregation data source 1
+-- Create dummy aggregation data source 3
 --
 -- DROP TABLE _TEST_DATA_SOURCE_3;
 CREATE OR REPLACE TRANSIENT TABLE _TEST_DATA_SOURCE_3
@@ -45,7 +45,7 @@ SET DATA_PT = DATA_PATTERN(ARRAY_CONSTRUCT(
     DATA_A3
 ));
 --
--- Create dummy aggregation data source 2
+-- Create dummy aggregation data source 3
 --
 -- DROP TABLE _TEST_DATA_SOURCE_4;
 CREATE OR REPLACE TRANSIENT TABLE _TEST_DATA_SOURCE_4
