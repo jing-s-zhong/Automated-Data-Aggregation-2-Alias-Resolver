@@ -323,7 +323,7 @@ try {
 					var joinItem = mapStack[j]["COLUMN"][i].split(':')[1].replace(/MAP_SOURCE/g, landscape["SOURCE_DATA"][i]);
 					for (alias in context) {
 						var aliasRegEx = new RegExp(alias, 'g');
-						joinItem = joinItem.replace(aliasRegEx, alias + '.' + context[alias][context[alias].length-1]);
+						joinItem = joinItem.replace(aliasRegEx, (alias === 'MAP_FILTER' ? '' : alias + '.') + context[alias][context[alias].length-1]);
 						//joinItem = joinItem.replace(aliasRegEx, alias + '.' + JSON.stringify(context[alias]) + '=>' + i);
 					}
 					dimMap[j]["MAP_JOIN"][dimMap[j]["MAP_JOIN"].length] = joinItem;
