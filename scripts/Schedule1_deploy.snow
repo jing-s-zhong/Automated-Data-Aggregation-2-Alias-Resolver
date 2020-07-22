@@ -125,7 +125,8 @@ try {
 	//
 	// Get the column definitions and compact the data scale by filtering out unneeded columns
 	//
-	var landscapeQuery = `SELECT BITAND_AGG(TO_NUMERIC(NULLIF(NULLIF(DATA_PATTERN,'GROUP_BY'),''))) OVER() MAP_PATTERN,
+	var landscapeQuery = `SELECT --BITAND_AGG(TO_NUMERIC(NULLIF(NULLIF(DATA_PATTERN,'GROUP_BY'),''))) OVER() MAP_PATTERN,
+      0 MAP_PATTERN,
       F.JOIN_MODE, A.*
 	FROM 
 	(
