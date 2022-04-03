@@ -6,7 +6,6 @@ The revenue reports provided by our revenue partners show a variety of differenc
 
 We designed an open aliasing system to handle the variety issues with the reports from our partners. We extract all physical concepts from all currently existing reports, and give each concept a standard name, then treat all possible names of the same concept in various reports as an alias. For example, we just use the word “Revenue” as a standard name to express a business concept of revenue, then we treat various column names like “earnings”, “gross_revenue”, “estimated_revenue”, “ad_revenue”, “gorss_revenue_usd”, “net_revenue_usd”, “estimated_gross_revenue” etc as the aliases of the “Revenue”. Whenever a column name shows up from a new partner for the concept of “Revenue”, we will that new column name as a new alias and configure it into the system. This way makes us able to handle any format of reports without making any code changes. The word “Open” means we are easy to accept and manage a variety of the report formats without any code change.
 
-
 ## II. Implementation on Snowflake
 
 We have designed and implemented a “Open Aliasing System” on Snowflake platform. Here I divide the code implementation into several sections based on the functions and give some brief explanations.
